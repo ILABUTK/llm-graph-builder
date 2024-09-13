@@ -1,49 +1,74 @@
-import { useEffect, useState, useMemo, useRef } from 'react';
-import ConnectionModal from './Popups/ConnectionModal/ConnectionModal';
-import FileTable, { ChildRef } from './FileTable';
-import { Button, Typography, Flex, StatusIndicator } from '@neo4j-ndl/react';
+import { useEffect, useState, useMemo, useRef, Suspense, useReducer, useCallback } from 'react';
+import FileTable from './FileTable';
+import { Button, Typography, Flex, StatusIndicator, useMediaQuery } from '@neo4j-ndl/react';
 import { useCredentials } from '../context/UserCredentials';
 import { useFileContext } from '../context/UsersFiles';
-import CustomAlert from './UI/Alert';
 import { extractAPI } from '../utils/FileAPI';
-import { ContentProps, CustomFile, OptionType, UserCredentials, alertStateType } from '../types';
+import {
+  BannerAlertProps,
+  ChildRef,
+  ContentProps,
+  CustomFile,
+  OptionType,
+  UserCredentials,
+  connectionState,
+} from '../types';
 import deleteAPI from '../services/DeleteFiles';
 import { postProcessing } from '../services/PostProcessing';
-import DeletePopUp from './Popups/DeletePopUp/DeletePopUp';
 import { triggerStatusUpdateAPI } from '../services/ServerSideStatusUpdateAPI';
 import useServerSideEvent from '../hooks/useSse';
 import { useSearchParams } from 'react-router-dom';
-import ConfirmationDialog from './Popups/LargeFilePopUp/ConfirmationDialog';
-import { buttonCaptions, defaultLLM, largeFileSize, llms, taskParam, tooltips } from '../utils/Constants';
+import { batchSize, buttonCaptions, defaultLLM, largeFileSize, llms, RETRY_OPIONS, tooltips } from '../utils/Constants';
 import ButtonWithToolTip from './UI/ButtonWithToolTip';
 import connectAPI from '../services/ConnectAPI';
-import SettingModalHOC from '../HOC/SettingModalHOC';
 import DropdownComponent from './Dropdown';
 import GraphViewModal from './Graph/GraphViewModal';
+import { lazy } from 'react';
+import FallBackDialog from './UI/FallBackDialog';
+import DeletePopUp from './Popups/DeletePopUp/DeletePopUp';
 import GraphEnhancementDialog from './Popups/GraphEnhancementDialog';
-import { OverridableStringUnion } from '@mui/types';
-import { AlertColor, AlertPropsColorOverrides } from '@mui/material';
+import { tokens } from '@neo4j-ndl/base';
+import RetryConfirmationDialog from './Popups/RetryConfirmation/Index';
+import retry from '../services/retry';
+import { showErrorToast, showNormalToast, showSuccessToast } from '../utils/toasts';
+import axios from 'axios';
+
+const ConnectionModal = lazy(() => import('./Popups/ConnectionModal/ConnectionModal'));
+const ConfirmationDialog = lazy(() => import('./Popups/LargeFilePopUp/ConfirmationDialog'));
+
+let afterFirstRender = false;
 
 const Content: React.FC<ContentProps> = ({
   isLeftExpanded,
   isRightExpanded,
-  openTextSchema,
   isSchema,
   setIsSchema,
   showEnhancementDialog,
-  setshowEnhancementDialog,
-  closeSettingModal
+  toggleEnhancementDialog,
+  closeSettingModal,
 }) => {
+  const { breakpoints } = tokens;
+  const isTablet = useMediaQuery(`(min-width:${breakpoints.xs}) and (max-width: ${breakpoints.lg})`);
   const [init, setInit] = useState<boolean>(false);
-  const [openConnection, setOpenConnection] = useState<boolean>(false);
+  const [openConnection, setOpenConnection] = useState<connectionState>({
+    openPopUp: false,
+    chunksExists: false,
+    vectorIndexMisMatch: false,
+    chunksExistsWithDifferentDimension: false,
+  });
   const [openGraphView, setOpenGraphView] = useState<boolean>(false);
   const [inspectedName, setInspectedName] = useState<string>('');
-  const [connectionStatus, setConnectionStatus] = useState<boolean>(false);
-  const { setUserCredentials, userCredentials } = useCredentials();
+  const { setUserCredentials, userCredentials, connectionStatus, setConnectionStatus } = useCredentials();
   const [showConfirmationModal, setshowConfirmationModal] = useState<boolean>(false);
   const [extractLoading, setextractLoading] = useState<boolean>(false);
-  const [isLargeFile, setIsLargeFile] = useState<boolean>(false);
-  const [showSettingnModal, setshowSettingModal] = useState<boolean>(false);
+  const [retryFile, setRetryFile] = useState<string>('');
+  const [retryLoading, setRetryLoading] = useState<boolean>(false);
+  const [showRetryPopup, toggleRetryPopup] = useReducer((state) => !state, false);
+  const [alertStateForRetry, setAlertStateForRetry] = useState<BannerAlertProps>({
+    showAlert: false,
+    alertType: 'neutral',
+    alertMessage: '',
+  });
 
   const {
     filesData,
@@ -55,50 +80,27 @@ const Content: React.FC<ContentProps> = ({
     setSelectedNodes,
     setRowSelection,
     setSelectedRels,
+    postProcessingTasks,
+    queue,
+    processedCount,
+    setProcessedCount,
   } = useFileContext();
   const [viewPoint, setViewPoint] = useState<'tableView' | 'showGraphView' | 'chatInfoView'>('tableView');
   const [showDeletePopUp, setshowDeletePopUp] = useState<boolean>(false);
   const [deleteLoading, setdeleteLoading] = useState<boolean>(false);
   const [searchParams] = useSearchParams();
-  const [alertDetails, setalertDetails] = useState<alertStateType>({
-    showAlert: false,
-    alertType: 'error',
-    alertMessage: '',
-  });
+
   const { updateStatusForLargeFiles } = useServerSideEvent(
     (inMinutes, time, fileName) => {
-      setalertDetails({
-        showAlert: true,
-        alertType: 'info',
-        alertMessage: `${fileName} will take approx ${time} ${inMinutes ? 'Min' : 'Sec'}`,
-      });
+      showNormalToast(`${fileName} will take approx ${time} ${inMinutes ? 'Min' : 'Sec'}`);
       localStorage.setItem('alertShown', JSON.stringify(true));
     },
     (fileName) => {
-      setalertDetails({
-        showAlert: true,
-        alertType: 'error',
-        alertMessage: `${fileName} Failed to process`,
-      });
+      showErrorToast(`${fileName} Failed to process`);
     }
   );
   const childRef = useRef<ChildRef>(null);
-  const openGraphEnhancementDialog = () => {
-    setshowEnhancementDialog(true);
-  };
-  const closeGraphEnhancementDialog = () => {
-    setshowEnhancementDialog(false);
-  };
-  const showAlert = (
-    alertmsg: string,
-    alerttype: OverridableStringUnion<AlertColor, AlertPropsColorOverrides> | undefined
-  ) => {
-    setalertDetails({
-      showAlert: true,
-      alertMessage: alertmsg,
-      alertType: alerttype,
-    });
-  };
+
   useEffect(() => {
     if (!init && !searchParams.has('connectURL')) {
       let session = localStorage.getItem('neo4j.connection');
@@ -112,21 +114,91 @@ const Content: React.FC<ContentProps> = ({
           port: neo4jConnection.uri.split(':')[2],
         });
       } else {
-        setOpenConnection(true);
+        setOpenConnection((prev) => ({ ...prev, openPopUp: true }));
       }
       setInit(true);
     } else {
-      setOpenConnection(true);
+      setOpenConnection((prev) => ({ ...prev, openPopUp: true }));
     }
   }, []);
 
   useEffect(() => {
     setFilesData((prevfiles) => {
       return prevfiles.map((curfile) => {
-        return { ...curfile, model: curfile.status === 'New' ? model : curfile.model };
+        return {
+          ...curfile,
+          model: curfile.status === 'New' || curfile.status === 'Reprocess' ? model : curfile.model,
+        };
       });
     });
   }, [model]);
+
+  useEffect(() => {
+    if (afterFirstRender) {
+      localStorage.setItem('processedCount', JSON.stringify({ db: userCredentials?.uri, count: processedCount }));
+    }
+    if (processedCount == batchSize) {
+      handleGenerateGraph([], true);
+    }
+  }, [processedCount, userCredentials]);
+
+  useEffect(() => {
+    if (afterFirstRender) {
+      localStorage.setItem('waitingQueue', JSON.stringify({ db: userCredentials?.uri, queue: queue.items }));
+    }
+    afterFirstRender = true;
+  }, [queue.items.length, userCredentials]);
+
+  useEffect(() => {
+    const storedSchema = localStorage.getItem('isSchema');
+    if (storedSchema !== null) {
+      setIsSchema(JSON.parse(storedSchema));
+    }
+  }, [isSchema]);
+
+  useEffect(() => {
+    const connection = localStorage.getItem('neo4j.connection');
+    if (connection != null) {
+      (async () => {
+        const parsedData = JSON.parse(connection);
+        console.log(parsedData.uri);
+        const response = await connectAPI(parsedData.uri, parsedData.user, parsedData.password, parsedData.database);
+        if (response?.data?.status === 'Success') {
+          localStorage.setItem(
+            'neo4j.connection',
+            JSON.stringify({
+              ...parsedData,
+              userDbVectorIndex: response.data.data.db_vector_dimension,
+            })
+          );
+          if (
+            (response.data.data.application_dimension === response.data.data.db_vector_dimension ||
+              response.data.data.db_vector_dimension == 0) &&
+            !response.data.data.chunks_exists
+          ) {
+            setConnectionStatus(true);
+            setOpenConnection((prev) => ({ ...prev, openPopUp: false }));
+          } else {
+            setOpenConnection({
+              openPopUp: true,
+              chunksExists: response.data.data.chunks_exists as boolean,
+              vectorIndexMisMatch:
+                response.data.data.db_vector_dimension > 0 &&
+                response.data.data.db_vector_dimension != response.data.data.application_dimension,
+              chunksExistsWithDifferentDimension:
+                response.data.data.db_vector_dimension > 0 &&
+                response.data.data.db_vector_dimension != response.data.data.application_dimension &&
+                (response.data.data.chunks_exists ?? true),
+            });
+            setConnectionStatus(false);
+          }
+        } else {
+          setOpenConnection((prev) => ({ ...prev, openPopUp: true }));
+          setConnectionStatus(false);
+        }
+      })();
+    }
+  }, []);
 
   const handleDropdownChange = (selectedOption: OptionType | null | void) => {
     if (selectedOption?.value) {
@@ -134,7 +206,7 @@ const Content: React.FC<ContentProps> = ({
     }
   };
 
-  const extractData = async (uid: string, isselectedRows = false) => {
+  const extractData = async (uid: string, isselectedRows = false, filesTobeProcess: CustomFile[]) => {
     if (!isselectedRows) {
       const fileItem = filesData.find((f) => f.id == uid);
       if (fileItem) {
@@ -142,7 +214,7 @@ const Content: React.FC<ContentProps> = ({
         await extractHandler(fileItem, uid);
       }
     } else {
-      const fileItem = childRef.current?.getSelectedRows().find((f) => f.id == uid);
+      const fileItem = filesTobeProcess.find((f) => f.id == uid);
       if (fileItem) {
         setextractLoading(true);
         await extractHandler(fileItem, uid);
@@ -151,6 +223,7 @@ const Content: React.FC<ContentProps> = ({
   };
 
   const extractHandler = async (fileItem: CustomFile, uid: string) => {
+    queue.remove(fileItem.name as string);
     try {
       setFilesData((prevfiles) =>
         prevfiles.map((curfile) => {
@@ -188,6 +261,7 @@ const Content: React.FC<ContentProps> = ({
         fileItem.model,
         userCredentials as UserCredentials,
         fileItem.fileSource,
+        fileItem.retryOption ?? '',
         fileItem.source_url,
         localStorage.getItem('accesskey'),
         localStorage.getItem('secretkey'),
@@ -223,70 +297,181 @@ const Content: React.FC<ContentProps> = ({
         });
       }
     } catch (err: any) {
-      const error = JSON.parse(err.message);
-      if (Object.keys(error).includes('fileName')) {
-        const { message } = error;
-        const { fileName } = error;
-        const errorMessage = error.message;
-        setalertDetails({
-          showAlert: true,
-          alertType: 'error',
-          alertMessage: message,
-        });
-        setFilesData((prevfiles) =>
-          prevfiles.map((curfile) => {
-            if (curfile.name == fileName) {
-              return {
-                ...curfile,
-                status: 'Failed',
-                errorMessage,
-              };
-            }
-            return curfile;
-          })
-        );
+      if (err instanceof Error) {
+        try {
+          const error = JSON.parse(err.message);
+          if (Object.keys(error).includes('fileName')) {
+            setProcessedCount((prev) => {
+              if (prev == batchSize) {
+                return batchSize - 1;
+              }
+              return prev + 1;
+            });
+            const { message, fileName } = error;
+            queue.remove(fileName);
+            const errorMessage = error.message;
+            showErrorToast(message);
+            setFilesData((prevfiles) =>
+              prevfiles.map((curfile) => {
+                if (curfile.name == fileName) {
+                  return { ...curfile, status: 'Failed', errorMessage };
+                }
+                return curfile;
+              })
+            );
+          } else {
+            console.error('Unexpected error format:', error);
+          }
+        } catch (parseError) {
+          if (axios.isAxiosError(err)) {
+            const axiosErrorMessage = err.response?.data?.message || err.message;
+            console.error('Axios error occurred:', axiosErrorMessage);
+          } else {
+            console.error('An unexpected error occurred:', err.message);
+          }
+        }
+      } else {
+        console.error('An unknown error occurred:', err);
       }
     }
   };
 
-  const handleGenerateGraph = (allowLargeFiles: boolean, selectedFilesFromAllfiles: CustomFile[]) => {
-    setIsLargeFile(false);
+  const triggerBatchProcessing = (
+    batch: CustomFile[],
+    selectedFiles: CustomFile[],
+    isSelectedFiles: boolean,
+    newCheck: boolean
+  ) => {
     const data = [];
-    if (selectedfileslength && allowLargeFiles) {
-      for (let i = 0; i < selectedfileslength; i++) {
-        const row = childRef.current?.getSelectedRows()[i];
-        if (row?.status === 'New') {
-          data.push(extractData(row.id, true));
+    showNormalToast(`Processing ${batch.length} files at a time.`);
+    for (let i = 0; i < batch.length; i++) {
+      if (newCheck) {
+        if (batch[i]?.status === 'New' || batch[i].status === 'Reprocess') {
+          data.push(extractData(batch[i].id, isSelectedFiles, selectedFiles as CustomFile[]));
         }
+      } else {
+        data.push(extractData(batch[i].id, isSelectedFiles, selectedFiles as CustomFile[]));
       }
-      Promise.allSettled(data).then(async (_) => {
-        setextractLoading(false);
-        await postProcessing(userCredentials as UserCredentials, taskParam);
-      });
-    } else if (selectedFilesFromAllfiles.length && allowLargeFiles) {
-      // @ts-ignore
-      for (let i = 0; i < selectedFilesFromAllfiles.length; i++) {
-        if (selectedFilesFromAllfiles[i]?.status === 'New') {
-          data.push(extractData(selectedFilesFromAllfiles[i].id as string));
-        }
-      }
-      Promise.allSettled(data).then(async (_) => {
-        setextractLoading(false);
-        await postProcessing(userCredentials as UserCredentials, taskParam);
-      });
+    }
+    return data;
+  };
+
+  const addFilesToQueue = (remainingFiles: CustomFile[]) => {
+    for (let index = 0; index < remainingFiles.length; index++) {
+      const f = remainingFiles[index];
+      setFilesData((prev) =>
+        prev.map((pf) => {
+          if (pf.id === f.id) {
+            return {
+              ...pf,
+              status: 'Waiting',
+            };
+          }
+          return pf;
+        })
+      );
+      queue.enqueue(f);
     }
   };
 
-  const handleClose = () => {
-    setalertDetails({
-      showAlert: false,
-      alertType: 'info',
-      alertMessage: '',
-    });
+  const scheduleBatchWiseProcess = (selectedRows: CustomFile[], isSelectedFiles: boolean) => {
+    let data = [];
+    if (queue.size() > batchSize) {
+      const batch = queue.items.slice(0, batchSize);
+      data = triggerBatchProcessing(batch, selectedRows as CustomFile[], isSelectedFiles, false);
+    } else {
+      let mergedfiles = [...selectedRows];
+      let filesToProcess: CustomFile[] = [];
+      if (mergedfiles.length > batchSize) {
+        filesToProcess = mergedfiles.slice(0, batchSize);
+        const remainingFiles = [...(mergedfiles as CustomFile[])].splice(batchSize);
+        addFilesToQueue(remainingFiles);
+      } else {
+        filesToProcess = mergedfiles;
+      }
+      data = triggerBatchProcessing(filesToProcess, selectedRows as CustomFile[], isSelectedFiles, false);
+    }
+    return data;
   };
+
+  /**
+   * Processes files in batches, respecting a maximum batch size.
+   *
+   * This function prioritizes processing files from the queue if it's not empty.
+   * If the queue is empty, it processes the provided `filesTobeProcessed`:
+   *   - If the number of files exceeds the batch size, it processes a batch and queues the rest.
+   *   - If the number of files is within the batch size, it processes them all.
+   *   - If there are already files being processed, it adjusts the batch size to avoid exceeding the limit.
+   *
+   * @param filesTobeProcessed - The files to be processed.
+   * @param queueFiles - Whether to prioritize processing files from the queue. Defaults to false.
+   */
+  const handleGenerateGraph = (filesTobeProcessed: CustomFile[], queueFiles: boolean = false) => {
+    let data = [];
+    const processingFilesCount = filesData.filter((f) => f.status === 'Processing').length;
+    if (filesTobeProcessed.length && !queueFiles && processingFilesCount < batchSize) {
+      if (!queue.isEmpty()) {
+        data = scheduleBatchWiseProcess(filesTobeProcessed as CustomFile[], true);
+      } else if (filesTobeProcessed.length > batchSize) {
+        const filesToProcess = filesTobeProcessed?.slice(0, batchSize) as CustomFile[];
+        data = triggerBatchProcessing(filesToProcess, filesTobeProcessed as CustomFile[], true, false);
+        const remainingFiles = [...(filesTobeProcessed as CustomFile[])].splice(batchSize);
+        addFilesToQueue(remainingFiles);
+      } else {
+        let filesTobeSchedule: CustomFile[] = filesTobeProcessed;
+        if (filesTobeProcessed.length + processingFilesCount > batchSize) {
+          filesTobeSchedule = filesTobeProcessed.slice(
+            0,
+            filesTobeProcessed.length + processingFilesCount - batchSize
+          ) as CustomFile[];
+          const idstoexclude = new Set(filesTobeSchedule.map((f) => f.id));
+          const remainingFiles = [...(childRef.current?.getSelectedRows() as CustomFile[])].filter(
+            (f) => !idstoexclude.has(f.id)
+          );
+          addFilesToQueue(remainingFiles);
+        }
+        data = triggerBatchProcessing(filesTobeSchedule, filesTobeProcessed, true, true);
+      }
+      Promise.allSettled(data).then(async (_) => {
+        setextractLoading(false);
+        await postProcessing(userCredentials as UserCredentials, postProcessingTasks);
+      });
+    } else if (queueFiles && !queue.isEmpty() && processingFilesCount < batchSize) {
+      data = scheduleBatchWiseProcess(queue.items, true);
+      Promise.allSettled(data).then(async (_) => {
+        setextractLoading(false);
+        await postProcessing(userCredentials as UserCredentials, postProcessingTasks);
+      });
+    } else {
+      addFilesToQueue(filesTobeProcessed as CustomFile[]);
+    }
+  };
+
+  function processWaitingFilesOnRefresh() {
+    let data = [];
+    const processingFilesCount = filesData.filter((f) => f.status === 'Processing').length;
+
+    if (!queue.isEmpty() && processingFilesCount < batchSize) {
+      if (queue.size() > batchSize) {
+        const batch = queue.items.slice(0, batchSize);
+        data = triggerBatchProcessing(batch, queue.items as CustomFile[], true, false);
+      } else {
+        data = triggerBatchProcessing(queue.items, queue.items as CustomFile[], true, false);
+      }
+      Promise.allSettled(data).then(async (_) => {
+        setextractLoading(false);
+        await postProcessing(userCredentials as UserCredentials, postProcessingTasks);
+      });
+    } else {
+      const selectedNewFiles = childRef.current
+        ?.getSelectedRows()
+        .filter((f) => f.status === 'New' || f.status == 'Reprocess');
+      addFilesToQueue(selectedNewFiles as CustomFile[]);
+    }
+  }
 
   const handleOpenGraphClick = () => {
-    const bloomUrl = process.env.BLOOM_URL;
+    const bloomUrl = process.env.VITE_BLOOM_URL;
     const uriCoded = userCredentials?.uri.replace(/:\d+$/, '');
     const connectURL = `${uriCoded?.split('//')[0]}//${userCredentials?.userName}@${uriCoded?.split('//')[1]}:${
       userCredentials?.port ?? '7687'
@@ -311,11 +496,49 @@ const Content: React.FC<ContentProps> = ({
   };
 
   const disconnect = () => {
+    queue.clear();
+    setProcessedCount(0);
     setConnectionStatus(false);
     localStorage.removeItem('password');
     setUserCredentials({ uri: '', password: '', userName: '', database: '' });
     setSelectedNodes([]);
     setSelectedRels([]);
+  };
+
+  const retryHandler = async (filename: string, retryoption: string) => {
+    try {
+      setRetryLoading(true);
+      const response = await retry(userCredentials as UserCredentials, filename, retryoption);
+      setRetryLoading(false);
+      if (response.data.status === 'Failure') {
+        throw new Error(response.data.error);
+      }
+      const isStartFromBegining = retryoption === RETRY_OPIONS[0] || retryoption===RETRY_OPIONS[1];
+      setFilesData((prev) => {
+        return prev.map((f) => {
+          return f.name === filename
+            ? {
+                ...f,
+                status: 'Reprocess',
+                processingProgress: isStartFromBegining ? 0 : f.processingProgress,
+                NodesCount: isStartFromBegining ? 0 : f.NodesCount,
+                relationshipCount: isStartFromBegining ? 0 : f.relationshipCount,
+              }
+            : f;
+        });
+      });
+      showSuccessToast(response.data.message as string);
+      retryOnclose();
+    } catch (error) {
+      setRetryLoading(false);
+      if (error instanceof Error) {
+        setAlertStateForRetry({
+          showAlert: true,
+          alertMessage: error.message,
+          alertType: 'danger',
+        });
+      }
+    }
   };
 
   const selectedfileslength = useMemo(
@@ -324,7 +547,7 @@ const Content: React.FC<ContentProps> = ({
   );
 
   const newFilecheck = useMemo(
-    () => childRef.current?.getSelectedRows().filter((f) => f.status === 'New').length,
+    () => childRef.current?.getSelectedRows().filter((f) => f.status === 'New' || f.status == 'Reprocess').length,
     [childRef.current?.getSelectedRows()]
   );
 
@@ -333,7 +556,10 @@ const Content: React.FC<ContentProps> = ({
     [childRef.current?.getSelectedRows()]
   );
 
-  const dropdowncheck = useMemo(() => !filesData.some((f) => f.status === 'New'), [filesData]);
+  const dropdowncheck = useMemo(
+    () => !filesData.some((f) => f.status === 'New' || f.status === 'Waiting' || f.status === 'Reprocess'),
+    [filesData]
+  );
 
   const disableCheck = useMemo(
     () => (!selectedfileslength ? dropdowncheck : !newFilecheck),
@@ -345,25 +571,18 @@ const Content: React.FC<ContentProps> = ({
     [selectedfileslength, completedfileNo]
   );
 
-  // const processingCheck = () => {
-  //   const processingFiles = filesData.some((file) => file.status === 'Processing');
-  //   const selectedRowProcessing = childRef.current?.getSelectedRows().some((row) =>
-  //     filesData.some((file) => file.name === row && file.status === 'Processing')
-  //   );
-  //   return processingFiles || selectedRowProcessing;
-  // };
-
   const filesForProcessing = useMemo(() => {
     let newstatusfiles: CustomFile[] = [];
-    if (childRef.current?.getSelectedRows().length) {
-      childRef.current?.getSelectedRows().forEach((f) => {
-        const parsedFile: CustomFile = f;
-        if (parsedFile.status === 'New') {
+    const selectedRows = childRef.current?.getSelectedRows();
+    if (selectedRows?.length) {
+      for (let index = 0; index < selectedRows.length; index++) {
+        const parsedFile: CustomFile = selectedRows[index];
+        if (parsedFile.status === 'New' || parsedFile.status == 'Reprocess') {
           newstatusfiles.push(parsedFile);
         }
-      });
+      }
     } else if (filesData.length) {
-      newstatusfiles = filesData.filter((f) => f.status === 'New');
+      newstatusfiles = filesData.filter((f) => f.status === 'New' || f.status === 'Reprocess');
     }
     return newstatusfiles;
   }, [filesData, childRef.current?.getSelectedRows()]);
@@ -376,18 +595,19 @@ const Content: React.FC<ContentProps> = ({
         childRef.current?.getSelectedRows() as CustomFile[],
         deleteEntities
       );
+      queue.clear();
+      setProcessedCount(0);
       setRowSelection({});
       setdeleteLoading(false);
       if (response.data.status == 'Success') {
-        setalertDetails({
-          showAlert: true,
-          alertMessage: response.data.message,
-          alertType: 'success',
-        });
+        showSuccessToast(response.data.message);
         const filenames = childRef.current?.getSelectedRows().map((str) => str.name);
-        filenames?.forEach((name) => {
-          setFilesData((prev) => prev.filter((f) => f.name != name));
-        });
+        if (filenames?.length) {
+          for (let index = 0; index < filenames.length; index++) {
+            const name = filenames[index];
+            setFilesData((prev) => prev.filter((f) => f.name != name));
+          }
+        }
       } else {
         let errorobj = { error: response.data.error, message: response.data.message };
         throw new Error(JSON.stringify(errorobj));
@@ -398,171 +618,97 @@ const Content: React.FC<ContentProps> = ({
       if (err instanceof Error) {
         const error = JSON.parse(err.message);
         const { message } = error;
-        setalertDetails({
-          showAlert: true,
-          alertType: 'error',
-          alertMessage: message,
-        });
+        showErrorToast(message);
         console.log(err);
       }
     }
     setshowDeletePopUp(false);
   };
-  useEffect(() => {
-    const connection = localStorage.getItem('neo4j.connection');
-    if (connection != null) {
-      (async () => {
-        const parsedData = JSON.parse(connection);
-        console.log(parsedData.uri);
-        const response = await connectAPI(parsedData.uri, parsedData.user, parsedData.password, parsedData.database);
-        if (response?.data?.status === 'Success') {
-          setConnectionStatus(true);
-          setOpenConnection(false);
-        } else {
-          setOpenConnection(true);
-          setConnectionStatus(false);
-        }
-      })();
-    }
-  }, []);
-
-  useEffect(() => {
-    const storedSchema = localStorage.getItem('isSchema');
-    if (storedSchema !== null) {
-      setIsSchema(JSON.parse(storedSchema));
-    }
-  }, [isSchema]);
 
   const onClickHandler = () => {
-    if (isSchema) {
-      if (childRef.current?.getSelectedRows().length) {
-        let selectedLargeFiles: CustomFile[] = [];
-        childRef.current?.getSelectedRows().forEach((f) => {
-          const parsedData: CustomFile = f;
-          if (parsedData.fileSource === 'local file') {
-            if (typeof parsedData.size === 'number' && parsedData.status === 'New' && parsedData.size > largeFileSize) {
-              selectedLargeFiles.push(parsedData);
-            }
-          }
-        });
-        // @ts-ignore
-        if (selectedLargeFiles.length) {
-          setIsLargeFile(true);
-          setshowConfirmationModal(true);
-          handleGenerateGraph(false, []);
-        } else {
-          setIsLargeFile(false);
-          handleGenerateGraph(true, filesData);
-        }
-      } else if (filesData.length) {
-        const largefiles = filesData.filter((f) => {
-          if (typeof f.size === 'number' && f.status === 'New' && f.size > largeFileSize) {
-            return true;
-          }
-          return false;
-        });
-        const selectAllNewFiles = filesData.filter((f) => f.status === 'New');
-        const stringified = selectAllNewFiles.reduce((accu, f) => {
-          const key = f.id;
-          // @ts-ignore
-          accu[key] = true;
-          return accu;
-        }, {});
-        setRowSelection(stringified);
-        if (largefiles.length) {
-          setIsLargeFile(true);
-          setshowConfirmationModal(true);
-          handleGenerateGraph(false, []);
-        } else {
-          setIsLargeFile(false);
-          handleGenerateGraph(true, filesData);
+    const selectedRows = childRef.current?.getSelectedRows();
+    if (selectedRows?.length) {
+      let selectedLargeFiles: CustomFile[] = [];
+      for (let index = 0; index < selectedRows.length; index++) {
+        const parsedData: CustomFile = selectedRows[index];
+        if (
+          parsedData.fileSource === 'local file' &&
+          typeof parsedData.size === 'number' &&
+          (parsedData.status === 'New' || parsedData.status == 'Reprocess') &&
+          parsedData.size > largeFileSize
+        ) {
+          selectedLargeFiles.push(parsedData);
         }
       }
-    } else {
-      if (childRef.current?.getSelectedRows().length) {
-        let selectedLargeFiles: CustomFile[] = [];
-        childRef.current?.getSelectedRows().forEach((f) => {
-          const parsedData: CustomFile = f;
-          if (parsedData.fileSource === 'local file') {
-            if (typeof parsedData.size === 'number' && parsedData.status === 'New' && parsedData.size > largeFileSize) {
-              selectedLargeFiles.push(parsedData);
-            }
-          }
-        });
-        // @ts-ignore
-        if (selectedLargeFiles.length) {
-          setIsLargeFile(true);
-        } else {
-          setIsLargeFile(false);
-        }
-      } else if (filesData.length) {
-        const largefiles = filesData.filter((f) => {
-          if (typeof f.size === 'number' && f.status === 'New' && f.size > largeFileSize) {
-            return true;
-          }
-          return false;
-        });
-        const selectAllNewFiles = filesData.filter((f) => f.status === 'New');
-        const stringified = selectAllNewFiles.reduce((accu, f) => {
-          const key = f.id;
-          // @ts-ignore
-          accu[key] = true;
-          return accu;
-        }, {});
-        setRowSelection(stringified);
-        if (largefiles.length) {
-          setIsLargeFile(true);
-        } else {
-          setIsLargeFile(false);
-        }
+      if (selectedLargeFiles.length) {
+        setshowConfirmationModal(true);
+      } else {
+        handleGenerateGraph(selectedRows.filter((f) => f.status === 'New' || f.status === 'Reprocess'));
       }
-      setshowSettingModal(true);
+    } else if (filesData.length) {
+      const largefiles = filesData.filter((f) => {
+        if (typeof f.size === 'number' && (f.status === 'New' || f.status == 'Reprocess') && f.size > largeFileSize) {
+          return true;
+        }
+        return false;
+      });
+      const selectAllNewFiles = filesData.filter((f) => f.status === 'New' || f.status === 'Reprocess');
+      const stringified = selectAllNewFiles.reduce((accu, f) => {
+        const key = f.id;
+        // @ts-ignore
+        accu[key] = true;
+        return accu;
+      }, {});
+      setRowSelection(stringified);
+      if (largefiles.length) {
+        setshowConfirmationModal(true);
+      } else {
+        handleGenerateGraph(filesData.filter((f) => f.status === 'New' || f.status === 'Reprocess'));
+      }
     }
   };
 
-  const handleContinue = () => {
-    if (!isLargeFile) {
-      handleGenerateGraph(true, filesData);
-      setshowSettingModal(false);
-    } else {
-      setshowSettingModal(false);
-      setshowConfirmationModal(true);
-      handleGenerateGraph(false, []);
-    }
-    setIsSchema(true);
-    setalertDetails({
-      showAlert: true,
-      alertType: 'success',
-      alertMessage: 'Schema is set successfully',
+  const retryOnclose = useCallback(() => {
+    setRetryFile('');
+    setAlertStateForRetry({
+      showAlert: false,
+      alertMessage: '',
+      alertType: 'neutral',
     });
-    localStorage.setItem('isSchema', JSON.stringify(true));
-  };
+    setRetryLoading(false);
+    toggleRetryPopup();
+  }, []);
+
+  const onBannerClose = useCallback(() => {
+    setAlertStateForRetry({
+      showAlert: false,
+      alertMessage: '',
+      alertType: 'neutral',
+    });
+  }, []);
+
   return (
     <>
-      {alertDetails.showAlert && (
-        <CustomAlert
-          severity={alertDetails.alertType}
-          open={alertDetails.showAlert}
-          handleClose={handleClose}
-          alertMessage={alertDetails.alertMessage}
-        />
-      )}
-      {isSchema && (
-        <CustomAlert
-          severity={alertDetails.alertType}
-          open={alertDetails.showAlert}
-          handleClose={handleClose}
-          alertMessage={alertDetails.alertMessage}
-        />
-      )}
+      <RetryConfirmationDialog
+        retryLoading={retryLoading}
+        retryHandler={retryHandler}
+        fileId={retryFile}
+        onClose={retryOnclose}
+        open={showRetryPopup}
+        onBannerClose={onBannerClose}
+        alertStatus={alertStateForRetry}
+      />
       {showConfirmationModal && filesForProcessing.length && (
-        <ConfirmationDialog
-          open={showConfirmationModal}
-          largeFiles={filesForProcessing}
-          extractHandler={handleGenerateGraph}
-          onClose={() => setshowConfirmationModal(false)}
-          loading={extractLoading}
-        ></ConfirmationDialog>
+        <Suspense fallback={<FallBackDialog />}>
+          <ConfirmationDialog
+            open={showConfirmationModal}
+            largeFiles={filesForProcessing}
+            extractHandler={handleGenerateGraph}
+            onClose={() => setshowConfirmationModal(false)}
+            loading={extractLoading}
+            selectedRows={childRef.current?.getSelectedRows() as CustomFile[]}
+          ></ConfirmationDialog>
+        </Suspense>
       )}
       {showDeletePopUp && (
         <DeletePopUp
@@ -574,32 +720,26 @@ const Content: React.FC<ContentProps> = ({
           view='contentView'
         ></DeletePopUp>
       )}
-      {showSettingnModal && (
-        <SettingModalHOC
-          settingView='contentView'
-          onClose={() => setshowSettingModal(false)}
-          onContinue={handleContinue}
-          open={showSettingnModal}
-          openTextSchema={openTextSchema}
-          isSchema={isSchema}
-          setIsSchema={setIsSchema}
-        />
-      )}
       {showEnhancementDialog && (
         <GraphEnhancementDialog
           open={showEnhancementDialog}
-          onClose={closeGraphEnhancementDialog}
+          onClose={toggleEnhancementDialog}
           closeSettingModal={closeSettingModal}
-          showAlert={showAlert}
         ></GraphEnhancementDialog>
       )}
       <div className={`n-bg-palette-neutral-bg-default ${classNameCheck}`}>
-        <Flex className='w-full' alignItems='center' justifyContent='space-between' flexDirection='row'>
-          <ConnectionModal
-            open={openConnection}
-            setOpenConnection={setOpenConnection}
-            setConnectionStatus={setConnectionStatus}
-          />
+        <Flex className='w-full' alignItems='center' justifyContent='space-between' flexDirection='row' flexWrap='wrap'>
+          <Suspense fallback={<FallBackDialog />}>
+            <ConnectionModal
+              open={openConnection.openPopUp}
+              setOpenConnection={setOpenConnection}
+              setConnectionStatus={setConnectionStatus}
+              isVectorIndexMatch={openConnection.vectorIndexMisMatch}
+              chunksExistsWithoutEmbedding={openConnection.chunksExists}
+              chunksExistsWithDifferentEmbedding={openConnection.chunksExistsWithDifferentDimension}
+            />
+          </Suspense>
+
           <div className='connectionstatus__container'>
             <span className='h6 px-1'>Neo4j connection</span>
             <Typography variant='body-medium'>
@@ -631,15 +771,27 @@ const Content: React.FC<ContentProps> = ({
             </Typography>
           </div>
           <div>
-            <Button className='mr-2.5' onClick={openGraphEnhancementDialog} disabled={!connectionStatus}>
+            <ButtonWithToolTip
+              placement='top'
+              text='Configure Graph Schema, Delete disconnected Entities, Merge duplicate Entities'
+              label='Graph Enhancemnet Settings'
+              className='mr-2.5'
+              onClick={toggleEnhancementDialog}
+              disabled={!connectionStatus}
+              size={isTablet ? 'small' : 'medium'}
+            >
               Graph Enhancement
-            </Button>
+            </ButtonWithToolTip>
             {!connectionStatus ? (
-              <Button className='mr-2.5' onClick={() => setOpenConnection(true)}>
+              <Button
+                size={isTablet ? 'small' : 'medium'}
+                className='mr-2.5'
+                onClick={() => setOpenConnection((prev) => ({ ...prev, openPopUp: true }))}
+              >
                 {buttonCaptions.connectToNeo4j}
               </Button>
             ) : (
-              <Button className='mr-2.5' onClick={disconnect}>
+              <Button size={isTablet ? 'small' : 'medium'} className='mr-2.5' onClick={disconnect}>
                 {buttonCaptions.disconnect}
               </Button>
             )}
@@ -654,14 +806,19 @@ const Content: React.FC<ContentProps> = ({
             setOpenGraphView(true);
             setViewPoint('tableView');
           }}
+          onRetry={(id) => {
+            setRetryFile(id);
+            toggleRetryPopup();
+          }}
           ref={childRef}
+          handleGenerateGraph={processWaitingFilesOnRefresh}
         ></FileTable>
         <Flex
           className={`${
             !isLeftExpanded && !isRightExpanded ? 'w-[calc(100%-128px)]' : 'w-full'
           } p-2.5 absolute bottom-4 mt-1.5 self-start`}
           justifyContent='space-between'
-          flexDirection='row'
+          flexDirection={isTablet ? 'column' : 'row'}
         >
           <DropdownComponent
             onSelect={handleDropdownChange}
@@ -671,7 +828,7 @@ const Content: React.FC<ContentProps> = ({
             view='ContentView'
             isDisabled={false}
           />
-          <Flex flexDirection='row' gap='4' className='self-end'>
+          <Flex flexDirection='row' gap='4' className='self-end' flexWrap='wrap'>
             <ButtonWithToolTip
               text={tooltips.generateGraph}
               placement='top'
@@ -679,6 +836,7 @@ const Content: React.FC<ContentProps> = ({
               onClick={onClickHandler}
               disabled={disableCheck}
               className='mr-0.5'
+              size={isTablet ? 'small' : 'medium'}
             >
               {buttonCaptions.generateGraph}{' '}
               {selectedfileslength && !disableCheck && newFilecheck ? `(${newFilecheck})` : ''}
@@ -690,6 +848,7 @@ const Content: React.FC<ContentProps> = ({
               disabled={showGraphCheck}
               className='mr-0.5'
               label='show graph'
+              size={isTablet ? 'small' : 'medium'}
             >
               {buttonCaptions.showPreviewGraph} {selectedfileslength && completedfileNo ? `(${completedfileNo})` : ''}
             </ButtonWithToolTip>
@@ -700,6 +859,7 @@ const Content: React.FC<ContentProps> = ({
               disabled={!filesData.some((f) => f?.status === 'Completed')}
               className='ml-0.5'
               label='Open Graph with Bloom'
+              size={isTablet ? 'small' : 'medium'}
             >
               {buttonCaptions.exploreGraphWithBloom}
             </ButtonWithToolTip>
@@ -712,6 +872,7 @@ const Content: React.FC<ContentProps> = ({
               disabled={!selectedfileslength}
               className='ml-0.5'
               label='Delete Files'
+              size={isTablet ? 'small' : 'medium'}
             >
               {buttonCaptions.deleteFiles}
               {selectedfileslength != undefined && selectedfileslength > 0 && `(${selectedfileslength})`}

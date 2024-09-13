@@ -69,14 +69,3 @@ Update the environment variable in `.env` file.
 
 ## Contact
 For questions or support, feel free to contact us at christopher.crosbie@neo4j.com or michael.hunger@neo4j.com
-
-
-## XP-local
-```
-python -m venv .envllm
-source .envllm/bin/activate 
-pip install -r requirements.txt
-uvicorn score:app --reload
-```
-- changed line 20 in requirements.txt 
-   - contourpy==1.1.1

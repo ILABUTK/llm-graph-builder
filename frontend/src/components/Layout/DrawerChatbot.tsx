@@ -1,13 +1,9 @@
 import { Drawer } from '@neo4j-ndl/react';
 import Chatbot from '../ChatBot/Chatbot';
-import { Messages } from '../../types';
+import { DrawerChatbotProps, Messages } from '../../types';
 import { useMessageContext } from '../../context/UserMessages';
-interface DrawerChatbotProps {
-  isExpanded: boolean;
-  clearHistoryData: boolean;
-  messages: Messages[];
-}
-const DrawerChatbot: React.FC<DrawerChatbotProps> = ({ isExpanded, clearHistoryData, messages }) => {
+
+const DrawerChatbot: React.FC<DrawerChatbotProps> = ({ isExpanded, clearHistoryData, messages, connectionStatus }) => {
   const { setMessages } = useMessageContext();
 
   const getIsLoading = (messages: Messages[]) => {
@@ -23,6 +19,7 @@ const DrawerChatbot: React.FC<DrawerChatbotProps> = ({ isExpanded, clearHistoryD
             setMessages={setMessages}
             clear={clearHistoryData}
             isLoading={getIsLoading(messages)}
+            connectionStatus={connectionStatus}
           />
         </Drawer.Body>
       </Drawer>

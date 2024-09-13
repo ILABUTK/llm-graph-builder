@@ -1,6 +1,6 @@
 import { TextInput } from '@neo4j-ndl/react';
 import React, { useState } from 'react';
-import { CustomFile, CustomFileBase, S3ModalProps, UserCredentials } from '../../../types';
+import { CustomFile, CustomFileBase, S3File, S3ModalProps, UserCredentials } from '../../../types';
 import { urlScanAPI } from '../../../services/URLScan';
 import { useCredentials } from '../../../context/UserCredentials';
 import { validation } from '../../../utils/Utils';
@@ -8,11 +8,7 @@ import { useFileContext } from '../../../context/UsersFiles';
 import { v4 as uuidv4 } from 'uuid';
 import CustomModal from '../../../HOC/CustomModal';
 import { buttonCaptions } from '../../../utils/Constants';
-interface S3File {
-  fileName: string;
-  fileSize: number;
-  url: string;
-}
+
 const S3Modal: React.FC<S3ModalProps> = ({ hideModal, open }) => {
   const [bucketUrl, setBucketUrl] = useState<string>('');
   const [accessKey, setAccessKey] = useState<string>('');
@@ -42,6 +38,8 @@ const S3Modal: React.FC<S3ModalProps> = ({ hideModal, open }) => {
       model: model,
       fileSource: 's3 bucket',
       processingProgress: undefined,
+      retryOption: '',
+      retryOptionStatus: false,
     };
     if (url) {
       setValid(validation(bucketUrl) && isFocused);
@@ -100,7 +98,6 @@ const S3Modal: React.FC<S3ModalProps> = ({ hideModal, open }) => {
               model: defaultValues.model,
               fileSource: defaultValues.fileSource,
               processingProgress: defaultValues.processingProgress,
-              // total_pages: 'N/A',
             });
           }
         });
@@ -128,7 +125,19 @@ const S3Modal: React.FC<S3ModalProps> = ({ hideModal, open }) => {
     reset();
     setStatus('unknown');
   };
-
+  const handleKeyDown: React.KeyboardEventHandler<HTMLInputElement> = (e) => {
+    if (e.code === 'Enter') {
+      e.preventDefault(); //
+      // @ts-ignore
+      const { form } = e.target;
+      const index = Array.prototype.indexOf.call(form, e.target);
+      if (index + 1 < form.elements.length) {
+        form.elements[index + 1].focus();
+      } else {
+        submitHandler(bucketUrl);
+      }
+    }
+  };
   return (
     <CustomModal
       open={open}
@@ -140,55 +149,60 @@ const S3Modal: React.FC<S3ModalProps> = ({ hideModal, open }) => {
       submitLabel={buttonCaptions.submit}
     >
       <div className='w-full inline-block'>
-        <TextInput
-          id='url'
-          value={bucketUrl}
-          disabled={false}
-          label='Bucket URL'
-          aria-label='Bucket URL'
-          placeholder='s3://data.neo4j.com/pdf/'
-          autoFocus
-          fluid
-          required
-          errorText={!isValid && isFocused && 'Please Fill The Valid URL'}
-          onBlur={() => setValid(validation(bucketUrl) && isFocused)}
-          onChange={(e) => {
-            setisFocused(true);
-            setBucketUrl(e.target.value);
-          }}
-        />
-      </div>
-      <div className='flex justify-between items-center w-full gap-4 mt-3'>
-        <TextInput
-          id='access key'
-          value={accessKey}
-          disabled={false}
-          label='Access Key'
-          aria-label='Access Key'
-          className='w-full'
-          placeholder=''
-          fluid
-          required
-          type={'password'}
-          onChange={(e) => {
-            setAccessKey(e.target.value);
-          }}
-        />
-        <TextInput
-          id='secret key'
-          value={secretKey}
-          disabled={false}
-          label='Secret Key'
-          aria-label='Secret Key'
-          className='w-full'
-          placeholder=''
-          fluid
-          required
-          type={'password'}
-          onChange={(e) => {
-            setSecretKey(e.target.value);
-          }}
-        />
+        <form>
+          <TextInput
+            id='url'
+            value={bucketUrl}
+            disabled={false}
+            label='Bucket URL'
+            aria-label='Bucket URL'
+            placeholder='s3://data.neo4j.com/pdf/'
+            autoFocus
+            fluid
+            required
+            errorText={!isValid && isFocused && 'Please Fill The Valid URL'}
+            onBlur={() => setValid(validation(bucketUrl) && isFocused)}
+            onChange={(e) => {
+              setisFocused(true);
+              setBucketUrl(e.target.value);
+            }}
+            onKeyDown={handleKeyDown}
+          />
+          <div className='flex justify-between items-center w-full gap-4 mt-3'>
+            <TextInput
+              id='access key'
+              value={accessKey}
+              disabled={false}
+              label='Access Key'
+              aria-label='Access Key'
+              className='w-full'
+              placeholder=''
+              fluid
+              required
+              type={'password'}
+              onChange={(e) => {
+                setAccessKey(e.target.value);
+              }}
+              onKeyDown={handleKeyDown}
+            />
+            <TextInput
+              id='secret key'
+              value={secretKey}
+              disabled={false}
+              label='Secret Key'
+              aria-label='Secret Key'
+              className='w-full'
+              placeholder=''
+              fluid
+              required
+              type={'password'}
+              onChange={(e) => {
+                setSecretKey(e.target.value);
+              }}
+              onKeyDown={handleKeyDown}
+            />
+          </div>
+        </form>
       </div>
     </CustomModal>
   );

@@ -1,12 +1,13 @@
 import { useFileContext } from '../context/UsersFiles';
 import { eventResponsetypes } from '../types';
+import { batchSize } from '../utils/Constants';
 import { calculateProcessingTime } from '../utils/Utils';
 
 export default function useServerSideEvent(
   alertHandler: (inMinutes: boolean, minutes: number, filename: string) => void,
   errorHandler: (filename: string) => void
 ) {
-  const { setFilesData } = useFileContext();
+  const { setFilesData, setProcessedCount } = useFileContext();
   function updateStatusForLargeFiles(eventSourceRes: eventResponsetypes) {
     const {
       fileName,
@@ -44,7 +45,7 @@ export default function useServerSideEvent(
           });
         });
       }
-    } else if (status === 'Completed' || status === 'Cancelled') {
+    } else if (status === 'Completed') {
       setFilesData((prevfiles) => {
         return prevfiles.map((curfile) => {
           if (curfile.name == fileName) {
@@ -59,6 +60,12 @@ export default function useServerSideEvent(
           }
           return curfile;
         });
+      });
+      setProcessedCount((prev) => {
+        if (prev == batchSize) {
+          return batchSize - 1;
+        }
+        return prev + 1;
       });
     } else if (eventSourceRes.status === 'Failed') {
       setFilesData((prevfiles) => {

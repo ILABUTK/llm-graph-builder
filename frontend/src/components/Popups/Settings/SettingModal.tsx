@@ -1,6 +1,6 @@
 import { Dialog, Dropdown } from '@neo4j-ndl/react';
 import { OnChangeValue, ActionMeta } from 'react-select';
-import { OptionType, OptionTypeForExamples, SettingsModalProps, UserCredentials, schema } from '../../../types';
+import { OptionType, SettingsModalProps, UserCredentials, schema } from '../../../types';
 import { useFileContext } from '../../../context/UsersFiles';
 import { getNodeLabelsAndRelTypes } from '../../../services/GetNodeLabelsRelTypes';
 import { useCredentials } from '../../../context/UserCredentials';
@@ -56,12 +56,22 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
       removeNodesAndRels(removedNodelabels, removedRelations);
     }
     setSelectedSchemas(selectedOptions);
+    localStorage.setItem(
+      'selectedSchemas',
+      JSON.stringify({ db: userCredentials?.uri, selectedOptions: selectedOptions })
+    );
     const nodesFromSchema = selectedOptions.map((s) => JSON.parse(s.value).nodelabels).flat();
     const relationsFromSchema = selectedOptions.map((s) => JSON.parse(s.value).relationshipTypes).flat();
     let nodeOptionsFromSchema: OptionType[] = [];
-    nodesFromSchema.forEach((n) => nodeOptionsFromSchema.push({ label: n, value: n }));
+    for (let index = 0; index < nodesFromSchema.length; index++) {
+      const n = nodesFromSchema[index];
+      nodeOptionsFromSchema.push({ label: n, value: n });
+    }
     let relationshipOptionsFromSchema: OptionType[] = [];
-    relationsFromSchema.forEach((r) => relationshipOptionsFromSchema.push({ label: r, value: r }));
+    for (let index = 0; index < relationsFromSchema.length; index++) {
+      const r = relationsFromSchema[index];
+      relationshipOptionsFromSchema.push({ label: r, value: r });
+    }
     setSelectedNodes((prev) => {
       const combinedData = [...prev, ...nodeOptionsFromSchema];
       const uniqueLabels = new Set();
@@ -119,8 +129,8 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const { showAlert } = useAlertContext();
 
   useEffect(() => {
-    const parsedData = schemaExamples.reduce((accu: OptionTypeForExamples[], example) => {
-      const examplevalues: OptionTypeForExamples = {
+    const parsedData = schemaExamples.reduce((accu: OptionType[], example) => {
+      const examplevalues: OptionType = {
         label: example.schema,
         value: JSON.stringify({
           nodelabels: example.labels,
@@ -172,6 +182,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
       'selectedRelationshipLabels',
       JSON.stringify({ db: userCredentials?.uri, selectedOptions: [] })
     );
+    localStorage.setItem('selectedSchemas', JSON.stringify({ db: userCredentials?.uri, selectedOptions: [] }));
     showAlert('info', `Successfully Removed the Schema settings`);
     onClose();
   };

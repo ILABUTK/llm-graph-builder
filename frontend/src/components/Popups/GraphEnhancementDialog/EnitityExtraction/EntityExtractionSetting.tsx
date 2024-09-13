@@ -1,14 +1,15 @@
 import { MouseEventHandler, useCallback, useEffect, useState } from 'react';
-import ButtonWithToolTip from '../../UI/ButtonWithToolTip';
-import { appLabels, buttonCaptions, tooltips } from '../../../utils/Constants';
-import { Dropdown, Flex, Typography } from '@neo4j-ndl/react';
-import { useCredentials } from '../../../context/UserCredentials';
-import { useFileContext } from '../../../context/UsersFiles';
+import ButtonWithToolTip from '../../../UI/ButtonWithToolTip';
+import { appLabels, buttonCaptions, tooltips } from '../../../../utils/Constants';
+import { Dropdown, Flex, Typography, useMediaQuery } from '@neo4j-ndl/react';
+import { useCredentials } from '../../../../context/UserCredentials';
+import { useFileContext } from '../../../../context/UsersFiles';
 import { OnChangeValue, ActionMeta } from 'react-select';
-import { OptionType, OptionTypeForExamples, schema, UserCredentials } from '../../../types';
-import { useAlertContext } from '../../../context/Alert';
-import { getNodeLabelsAndRelTypes } from '../../../services/GetNodeLabelsRelTypes';
-import schemaExamples from '../../../assets/schemas.json';
+import { OptionType, schema, UserCredentials } from '../../../../types';
+import { getNodeLabelsAndRelTypes } from '../../../../services/GetNodeLabelsRelTypes';
+import schemaExamples from '../../../../assets/schemas.json';
+import { tokens } from '@neo4j-ndl/base';
+import { showNormalToast } from '../../../../utils/toasts';
 
 export default function EntityExtractionSetting({
   view,
@@ -27,6 +28,7 @@ export default function EntityExtractionSetting({
   onContinue?: () => void;
   colseEnhanceGraphSchemaDialog?: () => void;
 }) {
+  const { breakpoints } = tokens;
   const {
     setSelectedRels,
     setSelectedNodes,
@@ -39,7 +41,7 @@ export default function EntityExtractionSetting({
   } = useFileContext();
   const { userCredentials } = useCredentials();
   const [loading, setLoading] = useState<boolean>(false);
-
+  const isTablet = useMediaQuery(`(min-width:${breakpoints.xs}) and (max-width: ${breakpoints.lg})`);
   const removeNodesAndRels = (nodelabels: string[], relationshipTypes: string[]) => {
     const labelsToRemoveSet = new Set(nodelabels);
     const relationshipLabelsToremoveSet = new Set(relationshipTypes);
@@ -73,12 +75,22 @@ export default function EntityExtractionSetting({
       removeNodesAndRels(removedNodelabels, removedRelations);
     }
     setSelectedSchemas(selectedOptions);
+    localStorage.setItem(
+      'selectedSchemas',
+      JSON.stringify({ db: userCredentials?.uri, selectedOptions: selectedOptions })
+    );
     const nodesFromSchema = selectedOptions.map((s) => JSON.parse(s.value).nodelabels).flat();
     const relationsFromSchema = selectedOptions.map((s) => JSON.parse(s.value).relationshipTypes).flat();
     let nodeOptionsFromSchema: OptionType[] = [];
-    nodesFromSchema.forEach((n) => nodeOptionsFromSchema.push({ label: n, value: n }));
+    for (let index = 0; index < nodesFromSchema.length; index++) {
+      const n = nodesFromSchema[index];
+      nodeOptionsFromSchema.push({ label: n, value: n });
+    }
     let relationshipOptionsFromSchema: OptionType[] = [];
-    relationsFromSchema.forEach((r) => relationshipOptionsFromSchema.push({ label: r, value: r }));
+    for (let index = 0; index < relationsFromSchema.length; index++) {
+      const r = relationsFromSchema[index];
+      relationshipOptionsFromSchema.push({ label: r, value: r });
+    }
     setSelectedNodes((prev) => {
       const combinedData = [...prev, ...nodeOptionsFromSchema];
       const uniqueLabels = new Set();
@@ -139,11 +151,9 @@ export default function EntityExtractionSetting({
   const [relationshipTypeOptions, setrelationshipTypeOptions] = useState<OptionType[]>([]);
   const [defaultExamples, setdefaultExamples] = useState<OptionType[]>([]);
 
-  const { showAlert } = useAlertContext();
-
   useEffect(() => {
-    const parsedData = schemaExamples.reduce((accu: OptionTypeForExamples[], example) => {
-      const examplevalues: OptionTypeForExamples = {
+    const parsedData = schemaExamples.reduce((accu: OptionType[], example) => {
+      const examplevalues: OptionType = {
         label: example.schema,
         value: JSON.stringify({
           nodelabels: example.labels,
@@ -155,7 +165,6 @@ export default function EntityExtractionSetting({
     }, []);
     setdefaultExamples(parsedData);
   }, []);
-
   useEffect(() => {
     if (userCredentials) {
       if (open && view === 'Dialog') {
@@ -206,6 +215,7 @@ export default function EntityExtractionSetting({
     setSelectedSchemas([]);
     setSelectedNodes(nodeLabelOptions);
     setSelectedRels(relationshipTypeOptions);
+    setIsSchema(true);
     localStorage.setItem('isSchema', JSON.stringify(true));
   }, [nodeLabelOptions, relationshipTypeOptions]);
 
@@ -220,11 +230,22 @@ export default function EntityExtractionSetting({
       'selectedRelationshipLabels',
       JSON.stringify({ db: userCredentials?.uri, selectedOptions: [] })
     );
-    showAlert('info', `Successfully Removed the Schema settings`);
+    localStorage.setItem('selectedSchemas', JSON.stringify({ db: userCredentials?.uri, selectedOptions: [] }));
+    showNormalToast(`Successfully Removed the Schema settings`);
     if (view === 'Dialog' && onClose != undefined) {
       onClose();
     }
   };
+
+  // Load selectedSchemas from local storage on mount
+  useEffect(() => {
+    const storedSchemas = localStorage.getItem('selectedSchemas');
+    if (storedSchemas) {
+      const parsedSchemas = JSON.parse(storedSchemas);
+      setSelectedSchemas(parsedSchemas.selectedOptions);
+    }
+  }, []);
+
   return (
     <div>
       <Typography variant='body-medium'>
@@ -244,7 +265,7 @@ export default function EntityExtractionSetting({
         <Dropdown
           helpText='Schema Examples'
           label='Predefined Schema'
-          size={view === 'Tabs' ? 'large' : 'medium'}
+          size={view === 'Tabs' && !isTablet ? 'large' : isTablet ? 'small' : 'medium'}
           selectProps={{
             isClearable: true,
             isMulti: true,
@@ -261,33 +282,37 @@ export default function EntityExtractionSetting({
         <Dropdown
           helpText='You can select more than one values'
           label='Node Labels'
-          size={view === 'Tabs' ? 'large' : 'medium'}
+          size={view === 'Tabs' && !isTablet ? 'large' : isTablet ? 'small' : 'medium'}
           selectProps={{
             isClearable: true,
             isMulti: true,
             options: nodeLabelOptions,
             onChange: onChangenodes,
             value: selectedNodes,
-            classNamePrefix: 'node_label',
+            classNamePrefix: `${
+              isTablet ? 'tablet_entity_extraction_Tab_node_label' : 'entity_extraction_Tab_node_label'
+            }`,
           }}
           type='creatable'
         />
         <Dropdown
           helpText='You can select more than one values'
           label='Relationship Types'
-          size={view === 'Tabs' ? 'large' : 'medium'}
+          size={view === 'Tabs' && !isTablet ? 'large' : isTablet ? 'small' : 'medium'}
           selectProps={{
             isClearable: true,
             isMulti: true,
             options: relationshipTypeOptions,
             onChange: onChangerels,
             value: selectedRels,
-            classNamePrefix: 'relationship_label',
+            classNamePrefix: `${
+              isTablet ? 'tablet_entity_extraction_Tab_relationship_label' : 'entity_extraction_Tab_relationship_label'
+            }`,
           }}
           type='creatable'
         />
 
-        <Flex className='!mt-4 flex items-center' flexDirection='row' justifyContent='flex-end'>
+        <Flex className='!mt-4 mb-2 flex items-center' flexDirection='row' justifyContent='flex-end'>
           <Flex flexDirection='row' gap='4'>
             <ButtonWithToolTip
               loading={loading}

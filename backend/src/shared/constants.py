@@ -1,29 +1,70 @@
 MODEL_VERSIONS = {
-        "openai-gpt-3.5": "gpt-3.5-turbo-16k",
+        "openai-gpt-3.5": "gpt-3.5-turbo-0125",
         "gemini-1.0-pro": "gemini-1.0-pro-001",
         "gemini-1.5-pro": "gemini-1.5-pro-preview-0514",
-        "openai-gpt-4": "gpt-4-0125-preview",
-        "diffbot" : "gpt-4o",
-        "openai-gpt-4o":"gpt-4o",
+        "openai-gpt-4": "gpt-4-turbo-2024-04-09",
+        "diffbot" : "gpt-4-turbo-2024-04-09",
+        "openai-gpt-4o-mini": "gpt-4o-mini-2024-07-18",
+        "openai-gpt-4o":"gpt-4o-2024-08-06",
         "groq-llama3" : "llama3-70b-8192"
          }
-OPENAI_MODELS = ["openai-gpt-3.5", "openai-gpt-4o"]
+OPENAI_MODELS = ["openai-gpt-3.5", "openai-gpt-4o", "openai-gpt-4o-mini"]
 GEMINI_MODELS = ["gemini-1.0-pro", "gemini-1.5-pro"]
 GROQ_MODELS = ["groq-llama3"]
 BUCKET_UPLOAD = 'llm-graph-builder-upload'
 BUCKET_FAILED_FILE = 'llm-graph-builder-failed'
 PROJECT_ID = 'llm-experiments-387609' 
+GRAPH_CHUNK_LIMIT = 50 
 
+#query 
+GRAPH_QUERY = """
+MATCH docs = (d:Document) 
+WHERE d.fileName IN $document_names
+WITH docs, d ORDER BY d.createdAt DESC
+// fetch chunks for documents, currently with limit
+CALL {{
+  WITH d
+  OPTIONAL MATCH chunks=(d)<-[:PART_OF|FIRST_CHUNK]-(c:Chunk)
+  RETURN c, chunks LIMIT {graph_chunk_limit}
+}}
+
+WITH collect(distinct docs) as docs, collect(distinct chunks) as chunks, collect(distinct c) as selectedChunks
+WITH docs, chunks, selectedChunks
+// select relationships between selected chunks
+WITH *, 
+[ c in selectedChunks | [p=(c)-[:NEXT_CHUNK|SIMILAR]-(other) WHERE other IN selectedChunks | p]] as chunkRels
+
+// fetch entities and relationships between entities
+CALL {{
+  WITH selectedChunks
+  UNWIND selectedChunks as c
+  
+  OPTIONAL MATCH entities=(c:Chunk)-[:HAS_ENTITY]->(e)
+  OPTIONAL MATCH entityRels=(e)--(e2:!Chunk) WHERE exists {{
+    (e2)<-[:HAS_ENTITY]-(other) WHERE other IN selectedChunks
+  }}
+  RETURN collect(entities) as entities, collect(entityRels) as entityRels
+}}
+
+WITH apoc.coll.flatten(docs + chunks + chunkRels + entities + entityRels, true) as paths
+
+// distinct nodes and rels
+CALL {{ WITH paths UNWIND paths AS path UNWIND nodes(path) as node WITH distinct node 
+       RETURN collect(node /* {{.*, labels:labels(node), elementId:elementId(node), embedding:null, text:null}} */) AS nodes }}
+CALL {{ WITH paths UNWIND paths AS path UNWIND relationships(path) as rel RETURN collect(distinct rel) AS rels }}  
+RETURN nodes, rels
+
+"""
 
 ## CHAT SETUP
 CHAT_MAX_TOKENS = 1000
 CHAT_SEARCH_KWARG_K = 3
-CHAT_SEARCH_KWARG_SCORE_THRESHOLD = 0.7
+CHAT_SEARCH_KWARG_SCORE_THRESHOLD = 0.5
 CHAT_DOC_SPLIT_SIZE = 3000
 CHAT_EMBEDDING_FILTER_SCORE_THRESHOLD = 0.10
 CHAT_TOKEN_CUT_OFF = {
      ("openai-gpt-3.5",'azure_ai_gpt_35',"gemini-1.0-pro","gemini-1.5-pro","groq-llama3",'groq_llama3_70b','anthropic_claude_3_5_sonnet','fireworks_llama_v3_70b','bedrock_claude_3_5_sonnet', ) : 4, 
-     ("openai-gpt-4","diffbot" ,'azure_ai_gpt_4o',"openai-gpt-4o") : 28,
+     ("openai-gpt-4","diffbot" ,'azure_ai_gpt_4o',"openai-gpt-4o", "openai-gpt-4o-mini") : 28,
      ("ollama_llama3") : 2  
 } 
 
@@ -91,10 +132,10 @@ RETURN text, avg_score AS score,
 
 # VECTOR_GRAPH_SEARCH_QUERY="""
 # WITH node as chunk, score
-# MATCH (chunk)-[:PART_OF]->(d:Document)
+# MATCH (chunk)-[:__PART_OF__]->(d:__Document__)
 # CALL { WITH chunk
-# MATCH (chunk)-[:HAS_ENTITY]->(e)
-# MATCH path=(e)(()-[rels:!HAS_ENTITY&!PART_OF]-()){0,2}(:!Chunk&!Document)
+# MATCH (chunk)-[:__HAS_ENTITY__]->(e)
+# MATCH path=(e)(()-[rels:!__HAS_ENTITY__&!__PART_OF__]-()){0,2}(:!__Chunk__&!__Document__)
 # UNWIND rels as r
 # RETURN collect(distinct r) as rels
 # }
@@ -114,19 +155,19 @@ RETURN text, avg_score AS score,
 # VECTOR_GRAPH_SEARCH_QUERY = """
 # WITH node as chunk, score
 # // find the document of the chunk
-# MATCH (chunk)-[:PART_OF]->(d:Document)
+# MATCH (chunk)-[:__PART_OF__]->(d:__Document__)
 # // fetch entities
 # CALL { WITH chunk
 # // entities connected to the chunk
 # // todo only return entities that are actually in the chunk, remember we connect all extracted entities to all chunks
-# MATCH (chunk)-[:HAS_ENTITY]->(e)
+# MATCH (chunk)-[:__HAS_ENTITY__]->(e)
 
 # // depending on match to query embedding either 1 or 2 step expansion
 # WITH CASE WHEN true // vector.similarity.cosine($embedding, e.embedding ) <= 0.95
 # THEN 
-# collect { MATCH path=(e)(()-[rels:!HAS_ENTITY&!PART_OF]-()){0,1}(:!Chunk&!Document) RETURN path }
+# collect { MATCH path=(e)(()-[rels:!__HAS_ENTITY__&!__PART_OF__]-()){0,1}(:!Chunk&!__Document__) RETURN path }
 # ELSE 
-# collect { MATCH path=(e)(()-[rels:!HAS_ENTITY&!PART_OF]-()){0,2}(:!Chunk&!Document) RETURN path } 
+# collect { MATCH path=(e)(()-[rels:!__HAS_ENTITY__&!__PART_OF__]-()){0,2}(:!Chunk&!__Document__) RETURN path } 
 # END as paths
 
 # RETURN collect{ unwind paths as p unwind relationships(p) as r return distinct r} as rels,
@@ -235,3 +276,43 @@ as text,entities
 
 RETURN text, avg_score as score, {{length:size(text), source: COALESCE( CASE WHEN d.url CONTAINS "None" THEN d.fileName ELSE d.url END, d.fileName), chunkdetails: chunkdetails}} AS metadata
 """
+YOUTUBE_CHUNK_SIZE_SECONDS = 60
+
+QUERY_TO_GET_CHUNKS = """
+            MATCH (d:Document)
+            WHERE d.fileName = $filename
+            WITH d
+            OPTIONAL MATCH (d)<-[:PART_OF|FIRST_CHUNK]-(c:Chunk)
+            RETURN c.id as id, c.text as text, c.position as position 
+            """
+            
+QUERY_TO_DELETE_EXISTING_ENTITIES = """
+                                MATCH (d:Document {fileName:$filename})
+                                WITH d
+                                MATCH (d)<-[:PART_OF]-(c:Chunk)
+                                WITH d,c
+                                MATCH (c)-[:HAS_ENTITY]->(e)
+                                WHERE NOT EXISTS { (e)<-[:HAS_ENTITY]-()<-[:PART_OF]-(d2:Document) }
+                                DETACH DELETE e
+                                """   
+
+QUERY_TO_GET_LAST_PROCESSED_CHUNK_POSITION="""
+                              MATCH (d:Document)
+                              WHERE d.fileName = $filename
+                              WITH d
+                              MATCH (c:Chunk) WHERE c.embedding is null 
+                              RETURN c.id as id,c.position as position 
+                              ORDER BY c.position LIMIT 1
+                              """   
+QUERY_TO_GET_LAST_PROCESSED_CHUNK_WITHOUT_ENTITY = """
+                              MATCH (d:Document)
+                              WHERE d.fileName = $filename
+                              WITH d
+                              MATCH (d)<-[:PART_OF]-(c:Chunk) WHERE NOT exists {(c)-[:HAS_ENTITY]->()}
+                              RETURN c.id as id,c.position as position 
+                              ORDER BY c.position LIMIT 1
+                              """
+                              
+START_FROM_BEGINNING  = "start_from_beginning"     
+DELETE_ENTITIES_AND_START_FROM_BEGINNING = "delete_entities_and_start_from_beginning"
+START_FROM_LAST_PROCESSED_POSITION = "start_from_last_processed_position"                                                    

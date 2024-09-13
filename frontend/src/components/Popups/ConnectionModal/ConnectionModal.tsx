@@ -1,30 +1,31 @@
-import { Button, Dialog, TextInput, Dropdown, Banner, Dropzone, Typography, TextLink } from '@neo4j-ndl/react';
-import { Dispatch, SetStateAction, useCallback, useEffect, useMemo, useState } from 'react';
+import { Button, Dialog, TextInput, Dropdown, Banner, Dropzone, Typography, TextLink, Flex } from '@neo4j-ndl/react';
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import connectAPI from '../../../services/ConnectAPI';
 import { useCredentials } from '../../../context/UserCredentials';
 import { useSearchParams } from 'react-router-dom';
 import { buttonCaptions } from '../../../utils/Constants';
+import { createVectorIndex } from '../../../services/vectorIndexCreation';
+import { ConnectionModalProps, Message, UserCredentials } from '../../../types';
+import VectorIndexMisMatchAlert from './VectorIndexMisMatchAlert';
 
-interface Message {
-  type: 'success' | 'info' | 'warning' | 'danger' | 'unknown';
-  content: string;
-}
-
-interface ConnectionModalProps {
-  open: boolean;
-  setOpenConnection: Dispatch<SetStateAction<boolean>>;
-  setConnectionStatus: Dispatch<SetStateAction<boolean>>;
-}
-
-export default function ConnectionModal({ open, setOpenConnection, setConnectionStatus }: ConnectionModalProps) {
+export default function ConnectionModal({
+  open,
+  setOpenConnection,
+  setConnectionStatus,
+  isVectorIndexMatch,
+  chunksExistsWithoutEmbedding,
+  chunksExistsWithDifferentEmbedding,
+}: ConnectionModalProps) {
   let prefilledconnection = localStorage.getItem('neo4j.connection');
   let initialuri;
   let initialdb;
   let initialusername;
   let initialport;
   let initialprotocol;
+  let initialuserdbvectorindex;
   if (prefilledconnection) {
     let parsedcontent = JSON.parse(prefilledconnection);
+    initialuserdbvectorindex = parsedcontent.userDbVectorIndex;
     let urisplit = parsedcontent?.uri?.split('://');
     initialuri = urisplit[1];
     initialdb = parsedcontent?.database;
@@ -40,9 +41,16 @@ export default function ConnectionModal({ open, setOpenConnection, setConnection
   const [username, setUsername] = useState<string>(initialusername ?? 'neo4j');
   const [password, setPassword] = useState<string>('');
   const [connectionMessage, setMessage] = useState<Message | null>({ type: 'unknown', content: '' });
-  const { setUserCredentials } = useCredentials();
+  const { setUserCredentials, userCredentials } = useCredentials();
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [searchParams, setSearchParams] = useSearchParams();
+  const [userDbVectorIndex, setUserDbVectorIndex] = useState<number | undefined>(initialuserdbvectorindex ?? undefined);
+  const [vectorIndexLoading, setVectorIndexLoading] = useState<boolean>(false);
+  const connectRef = useRef<HTMLButtonElement>(null);
+  const uriRef = useRef<HTMLInputElement>(null);
+  const databaseRef = useRef<HTMLInputElement>(null);
+  const userNameRef = useRef<HTMLInputElement>(null);
+  const passwordRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (searchParams.has('connectURL')) {
@@ -51,7 +59,69 @@ export default function ConnectionModal({ open, setOpenConnection, setConnection
       searchParams.delete('connectURL');
       setSearchParams(searchParams);
     }
+    return () => {
+      setUserDbVectorIndex(undefined);
+    };
   }, [open]);
+
+  const recreateVectorIndex = useCallback(
+    async (isNewVectorIndex: boolean, usercredential: UserCredentials) => {
+      if (usercredential != null && Object.values(usercredential).length) {
+        try {
+          setVectorIndexLoading(true);
+          const response = await createVectorIndex(usercredential as UserCredentials, isNewVectorIndex);
+          setVectorIndexLoading(false);
+          if (response.data.status === 'Failed') {
+            throw new Error(response.data.error);
+          } else {
+            setMessage({
+              type: 'success',
+              content: 'Successfully created the vector index',
+            });
+            setConnectionStatus(true);
+            localStorage.setItem(
+              'neo4j.connection',
+              JSON.stringify({
+                uri: usercredential?.uri,
+                user: usercredential?.userName,
+                password: usercredential?.password,
+                database: usercredential?.database,
+                userDbVectorIndex: 384,
+              })
+            );
+          }
+        } catch (error) {
+          setVectorIndexLoading(false);
+          if (error instanceof Error) {
+            console.log('Error in recreating the vector index', error.message);
+            setMessage({ type: 'danger', content: error.message });
+          }
+        }
+        setTimeout(() => {
+          setMessage({ type: 'unknown', content: '' });
+          setOpenConnection((prev) => ({ ...prev, openPopUp: false }));
+        }, 3000);
+      }
+    },
+    [userCredentials, userDbVectorIndex]
+  );
+  useEffect(() => {
+    if (isVectorIndexMatch || chunksExistsWithoutEmbedding) {
+      setMessage({
+        type: 'danger',
+        content: (
+          <VectorIndexMisMatchAlert
+            recreateVectorIndex={() =>
+              recreateVectorIndex(chunksExistsWithDifferentEmbedding, userCredentials as UserCredentials)
+            }
+            isVectorIndexAlreadyExists={chunksExistsWithDifferentEmbedding || isVectorIndexMatch}
+            userVectorIndexDimension={JSON.parse(localStorage.getItem('neo4j.connection') ?? 'null').userDbVectorIndex}
+            chunksExists={chunksExistsWithoutEmbedding}
+          />
+        ),
+      });
+    }
+  }, [isVectorIndexMatch, chunksExistsWithDifferentEmbedding, chunksExistsWithoutEmbedding, userCredentials]);
 
   const parseAndSetURI = (uri: string, urlparams = false) => {
     const uriParts: string[] = uri.split('://');
@@ -62,7 +132,6 @@ export default function ConnectionModal({ open, setOpenConnection, setConnection
       // @ts-ignore
       const hostParts = uriHost.pop()?.split('-');
       if (hostParts != undefined) {
-        console.log(hostParts);
         if (hostParts.length == 2) {
           setURI(hostParts.pop() as string);
           setDatabase(hostParts.pop() as string);
@@ -128,29 +197,80 @@ export default function ConnectionModal({ open, setOpenConnection, setConnection
 
   const submitConnection = async () => {
     const connectionURI = `${protocol}://${URI}${URI.split(':')[1] ? '' : `:${port}`}`;
-    setUserCredentials({ uri: connectionURI, userName: username, password: password, database: database, port: port });
+    const credential = { uri: connectionURI, userName: username, password: password, database: database, port: port };
+    setUserCredentials(credential);
     setIsLoading(true);
-    const response = await connectAPI(connectionURI, username, password, database);
-    if (response?.data?.status === 'Success') {
-      localStorage.setItem(
-        'neo4j.connection',
-        JSON.stringify({ uri: connectionURI, user: username, password: password, database: database })
-      );
-      setConnectionStatus(true);
-      setMessage({
-        type: 'success',
-        content: response.data.message,
-      });
-      setOpenConnection(false);
-    } else {
-      setMessage({ type: 'danger', content: response.data.error });
-      setOpenConnection(true);
-      setPassword('');
-      setConnectionStatus(false);
+    try {
+      const response = await connectAPI(connectionURI, username, password, database);
+      setIsLoading(false);
+      if (response?.data?.status !== 'Success') {
+        throw new Error(response.data.error);
+      } else {
+        localStorage.setItem(
+          'neo4j.connection',
+          JSON.stringify({
+            uri: connectionURI,
+            user: username,
+            password: password,
+            database: database,
+            userDbVectorIndex,
+          })
+        );
+        setUserDbVectorIndex(response.data.data.db_vector_dimension);
+        if (
+          (response.data.data.application_dimension === response.data.data.db_vector_dimension ||
+            response.data.data.db_vector_dimension == 0) &&
+          !response.data.data.chunks_exists
+        ) {
+          setConnectionStatus(true);
+          setOpenConnection((prev) => ({ ...prev, openPopUp: false }));
+          setMessage({
+            type: 'success',
+            content: response.data.data.message,
+          });
+        } else if ((response.data.data.chunks_exists ?? true) && response.data.data.db_vector_dimension == 0) {
+          setMessage({
+            type: 'danger',
+            content: (
+              <VectorIndexMisMatchAlert
+                recreateVectorIndex={() => recreateVectorIndex(false, credential)}
+                isVectorIndexAlreadyExists={response.data.data.db_vector_dimension != 0}
+                chunksExists={true}
+              />
+            ),
+          });
+          return;
+        } else {
+          setMessage({
+            type: 'danger',
+            content: (
+              <VectorIndexMisMatchAlert
+                recreateVectorIndex={() => recreateVectorIndex(true, credential)}
+                isVectorIndexAlreadyExists={
+                  response.data.data.db_vector_dimension != 0 &&
+                  response.data.data.db_vector_dimension != response.data.data.application_dimension
+                }
+                chunksExists={true}
+                userVectorIndexDimension={response.data.data.db_vector_dimension}
+              />
+            ),
+          });
+          return;
+        }
+      }
+    } catch (error) {
+      setIsLoading(false);
+      if (error instanceof Error) {
+        setMessage({ type: 'danger', content: error.message });
+        setOpenConnection((prev) => ({ ...prev, openPopUp: true }));
+        setPassword('');
+        setConnectionStatus(false);
+      }
     }
-    setIsLoading(false);
     setTimeout(() => {
-      setMessage({ type: 'unknown', content: '' });
+      if (connectionMessage?.type != 'danger') {
+        setMessage({ type: 'unknown', content: '' });
+      }
       setPassword('');
     }, 3000);
   };
@@ -158,6 +278,24 @@ export default function ConnectionModal({ open, setOpenConnection, setConnection
   const onClose = useCallback(() => {
     setMessage({ type: 'unknown', content: '' });
   }, []);
+
+  const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>, nextRef?: React.RefObject<HTMLInputElement>) => {
+    if (e.code === 'Enter') {
+      e.preventDefault();
+      // @ts-ignore
+      const { form } = e.target;
+      if (form) {
+        const index = Array.prototype.indexOf.call(form, e.target);
+        if (index + 1 < form.elements.length) {
+          form.elements[index + 1].focus();
+        } else {
+          submitConnection();
+        }
+      } else {
+        nextRef?.current?.focus();
+      }
+    }
+  };
 
   const isDisabled = useMemo(() => !username || !URI || !password, [username, URI, password]);
 
@@ -168,9 +306,10 @@ export default function ConnectionModal({ open, setOpenConnection, setConnection
         open={open}
         aria-labelledby='form-dialog-title'
         onClose={() => {
-          setOpenConnection(false);
+          setOpenConnection((prev) => ({ ...prev, openPopUp: false }));
           setMessage({ type: 'unknown', content: '' });
         }}
+        disableCloseButton={vectorIndexLoading}
       >
         <Dialog.Header id='form-dialog-title'>Connect to Neo4j</Dialog.Header>
         <Dialog.Content className='n-flex n-flex-col n-gap-token-4'>
@@ -179,15 +318,23 @@ export default function ConnectionModal({ open, setOpenConnection, setConnection
               Don't have a Neo4j instance? Start for free today
             </TextLink>
           </Typography>
-          {connectionMessage?.type !== 'unknown' && (
-            <Banner
-              name='Connection Modal'
-              closeable
-              onClose={onClose}
-              type={connectionMessage?.type}
-              description={connectionMessage?.content}
-            ></Banner>
-          )}
+          {connectionMessage?.type !== 'unknown' &&
+            (vectorIndexLoading ? (
+              <Banner
+                name='Connection Modal'
+                closeable={false}
+                type={connectionMessage?.type}
+                description={connectionMessage?.content}
+              ></Banner>
+            ) : (
+              <Banner
+                name='Connection Modal'
+                closeable
+                onClose={onClose}
+                type={connectionMessage?.type}
+                description={connectionMessage?.content}
+              ></Banner>
+            ))}
           <div className='n-flex max-h-44'>
             <Dropzone
               isTesting={false}
@@ -224,6 +371,7 @@ export default function ConnectionModal({ open, setOpenConnection, setConnection
             />
             <div className='ml-[5%] w-[70%] inline-block'>
               <TextInput
+                ref={uriRef}
                 id='url'
                 value={URI}
                 disabled={false}
@@ -233,51 +381,73 @@ export default function ConnectionModal({ open, setOpenConnection, setConnection
                 onChange={(e) => setURI(e.target.value)}
                 onPaste={(e) => handleHostPasteChange(e)}
                 aria-label='Connection URI'
+                onKeyDown={(e) => handleKeyPress(e, databaseRef)}
               />
             </div>
           </div>
-          <TextInput
-            id='database'
-            value={database}
-            disabled={false}
-            label='Database'
-            aria-label='Database'
-            placeholder='neo4j'
-            fluid
-            required
-            onChange={(e) => setDatabase(e.target.value)}
-            className='w-full'
-          />
-          <div className='n-flex n-flex-row n-flex-wrap mb-2'>
-            <div className='w-[48.5%] mr-1.5 inline-block'>
-              <TextInput
-                id='username'
-                value={username}
-                disabled={false}
-                label='Username'
-                aria-label='Username'
-                placeholder='neo4j'
-                fluid
-                onChange={(e) => setUsername(e.target.value)}
-              />
+          <form>
+            <TextInput
+              ref={databaseRef}
+              id='database'
+              value={database}
+              disabled={false}
+              label='Database'
+              aria-label='Database'
+              placeholder='neo4j'
+              fluid
+              required
+              onChange={(e) => setDatabase(e.target.value)}
+              className='w-full'
+              onKeyDown={handleKeyPress}
+            />
+            <div className='n-flex n-flex-row n-flex-wrap mb-2'>
+              <div className='w-[48.5%] mr-1.5 inline-block'>
+                <TextInput
+                  ref={userNameRef}
+                  id='username'
+                  value={username}
+                  disabled={false}
+                  label='Username'
+                  aria-label='Username'
+                  placeholder='neo4j'
+                  fluid
+                  onChange={(e) => setUsername(e.target.value)}
+                  onKeyDown={handleKeyPress}
+                />
+              </div>
+              <div className='w-[48.5%] ml-[1.5%] inline-block'>
+                <TextInput
+                  ref={passwordRef}
+                  id='password'
+                  value={password}
+                  disabled={false}
+                  label='Password'
+                  aria-label='Password'
+                  placeholder='password'
+                  type='password'
+                  fluid
+                  onChange={(e) => setPassword(e.target.value)}
+                  onKeyDown={handleKeyPress}
+                />
+              </div>
             </div>
-            <div className='w-[48.5%] ml-[1.5%] inline-block'>
-              <TextInput
-                id='password'
-                value={password}
-                disabled={false}
-                label='Password'
-                aria-label='Password'
-                placeholder='password'
-                type='password'
-                fluid
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-          </div>
-          <Button loading={isLoading} disabled={isDisabled} onClick={() => submitConnection()}>
-            {buttonCaptions.connect}
-          </Button>
+          </form>
+          <Flex flexDirection='row' justifyContent='flex-end'>
+            <Button
+              loading={isLoading}
+              disabled={isDisabled}
+              onClick={() => submitConnection()}
+              ref={connectRef}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter') {
+                  submitConnection();
+                }
+              }}
+            >
+              {buttonCaptions.connect}
+            </Button>
+          </Flex>
         </Dialog.Content>
       </Dialog>
     </>

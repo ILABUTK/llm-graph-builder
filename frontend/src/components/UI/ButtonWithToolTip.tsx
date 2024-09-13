@@ -1,5 +1,5 @@
 import { Button, Tip } from '@neo4j-ndl/react';
-import React, { MouseEventHandler } from 'react';
+import React, { MouseEventHandler, useState } from 'react';
 
 const ButtonWithToolTip = ({
   text,
@@ -12,6 +12,8 @@ const ButtonWithToolTip = ({
   label,
   loading,
   fill = 'filled',
+  type = 'button',
+  color,
 }: {
   text: string | React.ReactNode;
   children: React.ReactNode;
@@ -25,9 +27,12 @@ const ButtonWithToolTip = ({
   loading?: boolean;
   label: string;
   fill?: 'filled' | 'outlined' | 'text';
+  type?: 'submit' | 'button' | 'reset';
+  color?: 'primary' | 'danger' | 'warning' | 'success' | 'neutral' | undefined;
 }) => {
+  const [isHovered, setIsHovered] = useState<boolean>(false);
   return (
-    <Tip allowedPlacements={[placement]}>
+    <Tip allowedPlacements={[placement]} type='tooltip'>
       <Tip.Trigger>
         <Button
           aria-label={label}
@@ -37,13 +42,19 @@ const ButtonWithToolTip = ({
           className={className}
           loading={loading}
           fill={fill}
+          type={type}
+          color={color}
+          onMouseEnter={() => setIsHovered(true)}
+          onMouseLeave={() => setIsHovered(false)}
         >
           {children}
         </Button>
       </Tip.Trigger>
-      <Tip.Content isPortaled={false} style={{ whiteSpace: 'nowrap' }}>
-        {text}
-      </Tip.Content>
+      {isHovered && (
+        <Tip.Content isPortaled={false} style={{ whiteSpace: 'nowrap' }}>
+          {text}
+        </Tip.Content>
+      )}
     </Tip>
   );
 };
